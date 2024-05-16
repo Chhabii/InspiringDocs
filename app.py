@@ -18,6 +18,9 @@ from langchain.memory import ConversationBufferMemory
 from langchain_community.callbacks import get_openai_callback
 from langchain_core.prompts import ChatPromptTemplate
 
+from langchain.retrievers import ContextualCompressionRetriever
+from langchain.retrievers.document_compressors import LLMChainExtractor
+
 
 from dotenv import load_dotenv
 import numpy as np
@@ -41,6 +44,10 @@ with st.sidebar:
     add_vertical_space(2)
     st.write("Made by Chhabi Acharya.")
 
+
+# Initialize session state for chat history
+if 'chat_history' not in st.session_state:
+    st.session_state['chat_history'] = []
 
 
 def main():
@@ -116,28 +123,63 @@ def main():
 
         if query: 
             try:
-                docs = vectorstores.similarity_search(query,k=3)
+                # docs = vectorstores.similarity_search(query,k=3)
+                llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0)
+                compressor = LLMChainExtractor.from_llm(llm)
+                base_retriever = vectorstores.as_retriever()
+
+                compression_retriever = ContextualCompressionRetriever(base_compressor=compressor, base_retriever=base_retriever)
+                
+                docs = compression_retriever.get_relevant_documents(query)
+                
+                # st.write("Docs: ",docs)#debugging
                 if docs:
-                    
-                    
-                    llm = ChatOpenAI(model="gpt-3.5-turbo-0125", temperature=0)
+                    #setup the memory and the chat prompt template
+                    memory = ConversationBufferMemory(return_messages=True)
                     prompt = ChatPromptTemplate.from_messages(
                         [
-                            ("system", "You are an assistant that helps answer questions from the given context: \n\n{context}\n\n Also guide user with question, they may ask. "),
+                            ("system", "You are an intelligent assistant that helps answer questions based on the provided context: \n\n{context}\n\n Additionally, suggest related questions the user might ask. If you don't know the answer, kindly prompt the user to ask a more specific question about the document."),
                             ("human", "{question}")
                         ]
                     )
-                    chain = create_stuff_documents_chain(llm,prompt)
+                     # Combine prompt and LLM using the new runnable pattern
+                    chain = prompt | llm
 
-                    response = chain.invoke({'context':docs,'question':query})
+                    memory_variables = memory.load_memory_variables({})
+                    # st.write("Memory Variables: ",memory_variables) #debugging
 
-                    st.write(response)
+                    #extract the context from the documents
+                    context = "\n".join([doc.page_content for doc in docs])
+                    # st.write("Context: ",context) #debugging
+
+                    # Use the chain to invoke the response
+                    response = chain.invoke({
+                        'context': docs, 
+                        'question': query,
+                        **memory_variables
+                    })
+                    
+                    # Save conversation to memory
+                    memory.save_context({"question": query}, {"answer": response.content})
+
+                    # st.write("Response text: ",response.content)
+                    # st.write("Conversation history:", memory.buffer)
+                    # memory_variables = memory.load_memory_variables({})
+                    # st.write("Memory Variables: ",memory_variables) #debugging
+
+                    # Save the interaction to session state
+                    st.session_state.chat_history.append((query, response.content))
+
 
                 else:
                     st.write("No documents found.")
             except Exception as e:
                 st.write(f"Failed to search: {e}")
-
+    # Display chat history
+    st.write("### Chat History")
+    for query, response in st.session_state.chat_history:
+        st.markdown(f"**You:** {query}")
+        st.markdown(f"**Bot:** {response}")
 
 
 if __name__ == "__main__":
